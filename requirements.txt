@@ -1,0 +1,7 @@
+pyTelegramBotAPI
+Flask
+psutil
+requests
+aiohttp
+python-telegram-bot>=20.0
+python-dotenv
