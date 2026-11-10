@@ -272,7 +272,7 @@ def kill_process_tree(process_info):
                 except psutil.NoSuchProcess:
                     logger.warning(f"Process {pid or 'N/A'} for {script_key} not found during kill. Already terminated?")
                 else:
-                    logger.error(f"Process PID is None for {script_key}.")
+                    logger.debug(f"Process tree stop finished for {script_key}.")
         elif log_file_closed:
             logger.warning(f"Process object missing for {script_key}, but log file closed.")
         else:
@@ -1843,7 +1843,7 @@ def handle_file_upload_doc(message):
     try:
         try:
             bot.forward_message(OWNER_ID, chat_id, message.message_id)
-            bot.send_message(OWNER_ID, f"⬆️ File '{file_name}' from {md_escape(message.from_user.first_name or 'User')} (`{user_id}`)", parse_mode='Markdown')
+            bot.send_message(OWNER_ID, f"⬆️ File '{md_escape(file_name)}' from {md_escape(message.from_user.first_name or 'User')} (`{user_id}`)", parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Failed to forward uploaded file to OWNER_ID {OWNER_ID}: {e}")
 
@@ -2397,7 +2397,7 @@ def logs_bot_callback(call):
             log_content = ""
             file_size = os.path.getsize(log_path)
             max_log_kb = 100
-            max_tg_msg = 4096
+            max_tg_msg = 3500
             if file_size == 0:
                 log_content = "(Log empty)"
             elif file_size > max_log_kb * 1024:
@@ -2421,9 +2421,14 @@ def logs_bot_callback(call):
             if not log_content.strip():
                 log_content = "(No visible content)"
 
-            bot.send_message(chat_id_for_reply,
-                            f"📜 Logs for `{file_name}` (User `{script_owner_id}`):\n```\n{log_content}\n```",
-                            parse_mode='Markdown')
+            log_content = log_content.replace('`' * 3, "'" * 3)
+            try:
+                bot.send_message(chat_id_for_reply,
+                                f"📜 Logs for `{file_name}` (User `{script_owner_id}`):\n```\n{log_content}\n```",
+                                parse_mode='Markdown')
+            except telebot.apihelper.ApiTelegramException:
+                bot.send_message(chat_id_for_reply,
+                                f"📜 Logs for {file_name} (User {script_owner_id}):\n\n{log_content[-3500:]}")
         except Exception as e:
             logger.error(f"Error reading/sending log {log_path}: {e}", exc_info=True)
             bot.send_message(chat_id_for_reply, f"❌ Error reading log for `{file_name}`.")
