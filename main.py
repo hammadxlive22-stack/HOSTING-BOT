@@ -42,7 +42,7 @@ def keep_alive():
 # --- End Flask Keep Alive ---
 
 # --- Configuration ---
-TOKEN = '7970221699:AAF5v2C5nR4DXuqq7ubLBTBVu8WcsU7PlYI'
+TOKEN = os.environ.get('BOT_TOKEN') or '7970221699:AAF5v2C5nR4DXuqq7ubLBTBVu8WcsU7PlYI'  # set BOT_TOKEN on Render, then delete this fallback
 OWNER_ID = 6320870476
 ADMIN_ID = 6320870476
 YOUR_USERNAME = '@HAMMADPAPA'
@@ -353,23 +353,38 @@ MB = 1024 * 1024
 
 RESOURCE_TIERS = {
     #            RAM limit   CPU (100 = 1 core)  max running  max procs  max file size
-    'free':    {'mem_mb': 256,  'cpu_pct': 50,  'max_running': 2,   'max_procs': 15, 'fsize_mb': 100},
-    'premium': {'mem_mb': 512,  'cpu_pct': 100, 'max_running': 10,  'max_procs': 30, 'fsize_mb': 300},
-    'admin':   {'mem_mb': 1024, 'cpu_pct': 200, 'max_running': 100, 'max_procs': 60, 'fsize_mb': 1000},
+    # Tuned for Render FREE (512 MB RAM total, shared 0.1 CPU). On a bigger server raise these.
+    'free':    {'mem_mb': 80,   'cpu_pct': 30,  'max_running': 1,   'max_procs': 10, 'fsize_mb': 50},
+    'premium': {'mem_mb': 120,  'cpu_pct': 50,  'max_running': 2,   'max_procs': 15, 'fsize_mb': 100},
+    'admin':   {'mem_mb': 180,  'cpu_pct': 80,  'max_running': 3,   'max_procs': 20, 'fsize_mb': 200},
 }
-MAX_TOTAL_RUNNING = 60          # hard cap of hosted scripts running at once (tune to your server)
-SYS_MEM_REFUSE_PCT = 85         # server RAM % above which new starts are refused
-SYS_MEM_EMERGENCY_PCT = 93      # server RAM % above which the heaviest non-admin script is killed
+MAX_TOTAL_RUNNING = 4           # hard cap of hosted scripts running at once (tune to your server)
+SYS_MEM_REFUSE_PCT = 78         # server RAM % above which new starts are refused
+SYS_MEM_EMERGENCY_PCT = 90      # server RAM % above which the heaviest non-admin script is killed
 SYS_CPU_REFUSE_PCT = 90         # server CPU % above which new starts are refused
 WATCHDOG_INTERVAL = 10          # seconds between resource checks
 CPU_STRIKES_MAX = 6             # consecutive over-limit checks (6 x 10s = 60s) before kill
 MAX_LOG_MB = 5                  # per-script log is truncated above this size
-MAX_PARALLEL_STARTS = 3         # scripts allowed to be *starting* at the same moment
+MAX_PARALLEL_STARTS = 1         # scripts allowed to be *starting* at the same moment
 EARLY_EXIT_WAIT = 4             # seconds to watch a fresh process for an instant crash
 MAX_RUN_ATTEMPTS = 5            # retries after auto-installing missing modules
 MEMBERSHIP_CACHE_TTL = 300      # seconds a successful channel/group check is cached
 
 START_SEM = threading.BoundedSemaphore(MAX_PARALLEL_STARTS)
+
+def container_mem_pct():
+    """Memory use of THIS container (cgroup). psutil.virtual_memory() shows the whole host on Render."""
+    try:
+        for cur, lim in (("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+                         ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes")):
+            if os.path.exists(cur) and os.path.exists(lim):
+                used = int(open(cur).read().strip())
+                limit_raw = open(lim).read().strip()
+                if limit_raw != 'max' and int(limit_raw) < (1 << 50):
+                    return used * 100.0 / int(limit_raw)
+    except Exception:
+        pass
+    return psutil.virtual_memory().percent
 _usage_state = {}
 _sys_cpu = 0.0
 
@@ -399,7 +414,7 @@ def can_start_script(user_id):
     if len(alive) >= MAX_TOTAL_RUNNING:
         return False, "⚠️ Server is at full capacity right now. Please try again in a few minutes."
     try:
-        if psutil.virtual_memory().percent >= SYS_MEM_REFUSE_PCT or _sys_cpu >= SYS_CPU_REFUSE_PCT:
+        if container_mem_pct() >= SYS_MEM_REFUSE_PCT or _sys_cpu >= SYS_CPU_REFUSE_PCT:
             return False, "⚠️ Server is under heavy load right now. Please try again in a few minutes."
     except Exception:
         pass
@@ -602,7 +617,7 @@ def resource_watchdog():
                     st['strikes'] = max(0, st['strikes'] - 1)
 
             # Emergency: server RAM almost full -> kill the heaviest non-admin script
-            if usage and psutil.virtual_memory().percent >= SYS_MEM_EMERGENCY_PCT:
+            if usage and container_mem_pct() >= SYS_MEM_EMERGENCY_PCT:
                 cand = [x for x in usage if x[2] != 'admin' and x[1] in bot_scripts]
                 if cand:
                     rss, key, _ = max(cand)
@@ -1318,10 +1333,14 @@ def handle_py_file(file_path, script_owner_id, user_folder, file_name, message):
 # --- End File Handling ---
 
 # --- Logic Functions (called by commands and text handlers) ---
+def md_escape(text):
+    """Escape characters that break Telegram legacy Markdown (names/bios with _ * ` [)."""
+    return re.sub(r'([_*`\[])', r'\\\1', str(text))
+
 def _logic_send_welcome(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
-    user_name = message.from_user.first_name
+    user_name = md_escape(message.from_user.first_name or 'User')
     user_username = message.from_user.username
 
     logger.info(f"Welcome request from user_id: {user_id}, username: @{user_username}")
@@ -1347,7 +1366,7 @@ def _logic_send_welcome(message):
     user_bio = "Could not fetch bio"
     photo_file_id = None
     try:
-        user_bio = bot.get_chat(user_id).bio or "No bio"
+        user_bio = md_escape(bot.get_chat(user_id).bio or "No bio")
     except Exception:
         pass
 
@@ -1361,7 +1380,7 @@ def _logic_send_welcome(message):
     if user_id not in active_users:
         add_active_user(user_id)
         try:
-            owner_notification = (f"🎉 New user!\n👤 Name: {user_name}\n✳️ User: @{user_username or 'N/A'}\n"
+            owner_notification = (f"🎉 New user!\n👤 Name: {user_name}\n✳️ User: @{md_escape(user_username or 'N/A')}\n"
                                   f"🆔 ID: `{user_id}`\n📝 Bio: {user_bio}")
             bot.send_message(OWNER_ID, owner_notification, parse_mode='Markdown')
             if photo_file_id:
@@ -1406,7 +1425,7 @@ def _logic_send_welcome(message):
     except Exception as e:
         logger.error(f"Error sending welcome to {user_id}: {e}", exc_info=True)
         try:
-            bot.send_message(chat_id, welcome_msg_text, reply_markup=main_reply_markup, parse_mode='Markdown')
+            bot.send_message(chat_id, welcome_msg_text.replace('`', '').replace('\\', ''), reply_markup=main_reply_markup)
         except Exception as fallback_e:
             logger.error(f"Fallback send_message failed for {user_id}: {fallback_e}")
 
@@ -1824,7 +1843,7 @@ def handle_file_upload_doc(message):
     try:
         try:
             bot.forward_message(OWNER_ID, chat_id, message.message_id)
-            bot.send_message(OWNER_ID, f"⬆️ File '{file_name}' from {message.from_user.first_name} (`{user_id}`)", parse_mode='Markdown')
+            bot.send_message(OWNER_ID, f"⬆️ File '{file_name}' from {md_escape(message.from_user.first_name or 'User')} (`{user_id}`)", parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Failed to forward uploaded file to OWNER_ID {OWNER_ID}: {e}")
 
@@ -2466,7 +2485,7 @@ def back_to_main_callback(call):
             user_status = "🆓 Free User (Expired Sub)"
     else:
         user_status = "🆓 Free User"
-    main_menu_text = (f"〽️ Welcome back, {call.from_user.first_name}!\n\n🆔 ID: {user_id}\n"
+    main_menu_text = (f"〽️ Welcome back, {md_escape(call.from_user.first_name or 'User')}!\n\n🆔 ID: {user_id}\n"
                       f"🔰 Status: {user_status}{expiry_info}\n📁 Files: {current_files} / {limit_str}\n\n"
                       f"👇 Use buttons or type commands.")
     try:
@@ -2912,6 +2931,12 @@ if __name__ == '__main__':
     logger.info("🚀 Starting polling...")
     while True:
         try:
+            # 409 fix: polling cannot work while a webhook is set on this token
+            try:
+                bot.remove_webhook()
+                logger.info("Webhook cleared (if any was set).")
+            except Exception as we:
+                logger.warning(f"remove_webhook failed: {we}")
             bot.infinity_polling(logger_level=logging.INFO, timeout=60, long_polling_timeout=30)
         except requests.exceptions.ReadTimeout:
             logger.warning("Polling ReadTimeout. Restarting in 5s...")
